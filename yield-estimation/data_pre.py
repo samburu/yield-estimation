@@ -3,49 +3,49 @@ import gzip
 import tempfile
 from pathlib import Path
 
+import boto3
+import botocore
+import geopandas as gpd
 import luigi
 import pandas as pd
-import geopandas as gpd
 import rasterio
 import requests
+import xarray as xr
 from kiluigi import IntermediateTarget
 from luigi import ExternalTask, LocalTarget, Task
 from luigi.util import requires
 from rasterstats import zonal_stats
 
-import boto3
-import botocore
-import xarray as xr
-
-
 DATA_DIR = "/home/pmburu/data"
 
 # No AWS keys required
-CLIENT = boto3.client('s3', config=botocore.client.Config(signature_version=botocore.UNSIGNED))
+CLIENT = boto3.client(
+    "s3", config=botocore.client.Config(signature_version=botocore.UNSIGNED)
+)
 
 
 class ScrapeERA5Var(ExternalTask):
     var = luigi.Parameter(default="air_temperature_at_2_metres")
     month = luigi.DateParameter(default=datetime.date(2012, 1, 1))
-    
+
     def output(self):
-        dst = Path(DATA_DIR) / self.var/ f"{self.month.strftime('%Y%m')}_{self.var}.nc"
+        dst = Path(DATA_DIR) / self.var / f"{self.month.strftime('%Y%m')}_{self.var}.nc"
         return LocalTarget(path=str(dst))
-    
+
     def run(self):
-        year = self.month.strftime('%Y')
-        month = self.month.strftime('%m')
+        year = self.month.strftime("%Y")
+        month = self.month.strftime("%m")
         s3_data_key = f"{year}/{month}/data/{self.var}.nc"
         temp = tempfile.NamedTemporaryFile(suffix=".nc")
-        era5_bucket = 'era5-pds'
+        era5_bucket = "era5-pds"
         CLIENT.download_file(era5_bucket, s3_data_key, temp.name)
         ds = xr.open_dataset(temp.name)
-        ds = ds.mean(dim='time0')
-        ds = ds.expand_dims({'month': [self.month.strftime("%Y-%m-%d")]})
+        ds = ds.mean(dim="time0")
+        ds = ds.expand_dims({"month": [self.month.strftime("%Y-%m-%d")]})
         with self.output().open("w") as out:
             ds.to_netcdf(out.name)
-        
-    
+
+
 class ScrapeRainfall(ExternalTask):
     month = luigi.DateParameter(default=datetime.date(2012, 1, 1))
 
@@ -93,30 +93,33 @@ class ScrapeAdminLevel2(ExternalTask):
                 for chunk in req.iter_content(chunk_size=1024):
                     fd.write(chunk)
 
+
 @requires(ScrapeRainfall, ScrapeAdminLevel2)
 class RainfallSummaryStats(Task):
     def output(self):
         return IntermediateTarget(task=self, timeout=1_036_800)
-    
+
     def run(self):
         rain_src = self.input()[0].path
         admin_src = self.input()[1].path
-        
+
         gdf = gpd.read_file(f"zip://{admin_src}")
-        gdf = gdf[['ADM1_EN', 'geometry']]
+        gdf = gdf[["ADM1_EN", "geometry"]]
         gdf = gdf.rename(columns={"ADM1_EN": "admin1"})
-        stats = ['min', 'max', 'mean', 'count', 'median']
-        feature = zonal_stats(gdf, rain_src, stats=stats, all_touched=True, geojson_out=True)
-        
+        stats = ["min", "max", "mean", "count", "median"]
+        feature = zonal_stats(
+            gdf, rain_src, stats=stats, all_touched=True, geojson_out=True
+        )
+
         gdf = gpd.GeoDataFrame.from_features(feature)
-        
-        month_str = self.month.strftime('%b')
-        gdf = gdf.rename(columns={i:f"{month_str}_rain_{i}" for i in stats})
-        gdf = gdf.drop('geometry', 1)
+
+        month_str = self.month.strftime("%b")
+        gdf = gdf.rename(columns={i: f"{month_str}_rain_{i}" for i in stats})
+        gdf = gdf.drop("geometry", 1)
         with self.output().open("w") as out:
             out.write(gdf)
-    
-    
+
+
 class GetMaizeProduction(ExternalTask):
     def output(self):
         return IntermediateTarget(task=self, timeout=1_036_800)
@@ -180,7 +183,7 @@ class GetMaizeProduction(ExternalTask):
             "Transnzoia": "Trans Nzoia",
             "Taita/Taveta": "Taita Taveta",
             "Tharaka Nithi": "Tharaka-Nithi",
-            'Tharaka-Nthi': "Tharaka-Nithi",
+            "Tharaka-Nthi": "Tharaka-Nithi",
             "Elgeyo/Marakwet": "Elgeyo-Marakwet",
             "Elgeyo Marakwet": "Elgeyo-Marakwet",
             "Nairobi ": "Nairobi",
@@ -195,26 +198,31 @@ class TrainingData(Task):
         rain_task = self.clone(RainfallSummaryStats)
         month_list = pd.date_range(
             datetime.date(2012, 1, 1), datetime.date(2019, 1, 1), freq="M"
-            )
+        )
         rain_task_map = {i: rain_task.clone(month=i) for i in month_list}
         return {"rain": rain_task_map, "yield": GetMaizeProduction()}
-    
+
     def run(self):
         input_map = self.input()
         year_map = {}
-        for k, v in input_map['rain'].items():
-            input_map['rain'][k] =  input_map['rain'][k].open().read().set_index('admin1')
-        years = set(i.year for i in input_map['rain'])
-        for year  in years:
+        for k, v in input_map["rain"].items():
+            input_map["rain"][k] = (
+                input_map["rain"][k].open().read().set_index("admin1")
+            )
+        years = set(i.year for i in input_map["rain"])
+        for year in years:
             year_map[year] = pd.concat(
-                [v for k, v in input_map['rain'].items() if k.year == year], 1
-                )
+                [v for k, v in input_map["rain"].items() if k.year == year], 1
+            )
         df = pd.concat(year_map)
         breakpoint()
+
 
 if __name__ == "__main__":
     month_list = pd.date_range(
         datetime.date(2012, 1, 1), datetime.date(2019, 1, 1), freq="M"
     )
-    luigi.build([ScrapeERA5Var(month=i) for i in month_list], workers=10, local_scheduler=True)
-    #luigi.build([ScrapeERA5Var()], workers=1, local_scheduler=True)
+    luigi.build(
+        [ScrapeERA5Var(month=i) for i in month_list], workers=10, local_scheduler=True
+    )
+    # luigi.build([ScrapeERA5Var()], workers=1, local_scheduler=True)
