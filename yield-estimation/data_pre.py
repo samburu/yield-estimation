@@ -193,6 +193,126 @@ class GetMaizeProduction(ExternalTask):
             out.write(df)
 
 
+class SoilSandContent(ExternalTask):
+    def output(self):
+        return LocalTarget(
+            "/home/pmburu/repo/yield-estimation/yield-estimation/data/af_SNDPPT_T__M_sd1_250m.tif"
+        )
+
+
+@requires(SoilSandContent, ScrapeAdminLevel2)
+class SoilSandSummary(Task):
+    def output(self):
+        return IntermediateTarget(task=self, timeout=1_036_800)
+
+    def run(self):
+        rain_src = self.input()[0].path
+        admin_src = self.input()[1].path
+
+        gdf = gpd.read_file(f"zip://{admin_src}")
+        gdf = gdf[["ADM1_EN", "geometry"]]
+        gdf = gdf.rename(columns={"ADM1_EN": "admin1"})
+        stats = ["min", "max", "mean", "count", "median"]
+        feature = zonal_stats(
+            gdf, rain_src, stats=stats, all_touched=True, geojson_out=True
+        )
+        gdf = gpd.GeoDataFrame.from_features(feature)
+        gdf = gdf.rename(columns={i: f"sand_{i}" for i in stats})
+        gdf = gdf.drop("geometry", 1)
+        with self.output().open("w") as out:
+            out.write(gdf)
+
+
+class SoilClayContent(ExternalTask):
+    def output(self):
+        return LocalTarget(
+            "/home/pmburu/repo/yield-estimation/yield-estimation/data/af_CLYPPT_T__M_sd1_250m.tif"
+        )
+
+
+@requires(SoilClayContent, ScrapeAdminLevel2)
+class SoilClaySummary(Task):
+    def output(self):
+        return IntermediateTarget(task=self, timeout=1_036_800)
+
+    def run(self):
+        rain_src = self.input()[0].path
+        admin_src = self.input()[1].path
+
+        gdf = gpd.read_file(f"zip://{admin_src}")
+        gdf = gdf[["ADM1_EN", "geometry"]]
+        gdf = gdf.rename(columns={"ADM1_EN": "admin1"})
+        stats = ["min", "max", "mean", "count", "median"]
+        feature = zonal_stats(
+            gdf, rain_src, stats=stats, all_touched=True, geojson_out=True
+        )
+        gdf = gpd.GeoDataFrame.from_features(feature)
+        gdf = gdf.rename(columns={i: f"clay_{i}" for i in stats})
+        gdf = gdf.drop("geometry", 1)
+        with self.output().open("w") as out:
+            out.write(gdf)
+
+
+class SoilBulkDensity(ExternalTask):
+    def output(self):
+        return LocalTarget(
+            "/home/pmburu/repo/yield-estimation/yield-estimation/data/af_BLD_T__M_sd1_250m.tif"
+        )
+
+
+@requires(SoilBulkDensity, ScrapeAdminLevel2)
+class SoilBulkDensitySummary(Task):
+    def output(self):
+        return IntermediateTarget(task=self, timeout=1_036_800)
+
+    def run(self):
+        rain_src = self.input()[0].path
+        admin_src = self.input()[1].path
+
+        gdf = gpd.read_file(f"zip://{admin_src}")
+        gdf = gdf[["ADM1_EN", "geometry"]]
+        gdf = gdf.rename(columns={"ADM1_EN": "admin1"})
+        stats = ["min", "max", "mean", "count", "median"]
+        feature = zonal_stats(
+            gdf, rain_src, stats=stats, all_touched=True, geojson_out=True
+        )
+        gdf = gpd.GeoDataFrame.from_features(feature)
+        gdf = gdf.rename(columns={i: f"bulkdensity_{i}" for i in stats})
+        gdf = gdf.drop("geometry", 1)
+        with self.output().open("w") as out:
+            out.write(gdf)
+
+
+class SoilSiltContent(ExternalTask):
+    def output(self):
+        return LocalTarget(
+            "/home/pmburu/repo/yield-estimation/yield-estimation/data/af_SLTPPT_T__M_sd1_250m.tif"
+        )
+
+
+@requires(SoilSiltContent, ScrapeAdminLevel2)
+class SoilSiltSummary(Task):
+    def output(self):
+        return IntermediateTarget(task=self, timeout=1_036_800)
+
+    def run(self):
+        rain_src = self.input()[0].path
+        admin_src = self.input()[1].path
+
+        gdf = gpd.read_file(f"zip://{admin_src}")
+        gdf = gdf[["ADM1_EN", "geometry"]]
+        gdf = gdf.rename(columns={"ADM1_EN": "admin1"})
+        stats = ["min", "max", "mean", "count", "median"]
+        feature = zonal_stats(
+            gdf, rain_src, stats=stats, all_touched=True, geojson_out=True
+        )
+        gdf = gpd.GeoDataFrame.from_features(feature)
+        gdf = gdf.rename(columns={i: f"silt_{i}" for i in stats})
+        gdf = gdf.drop("geometry", 1)
+        with self.output().open("w") as out:
+            out.write(gdf)
+
+
 class TrainingData(Task):
     def requires(self):
         rain_task = self.clone(RainfallSummaryStats)
@@ -200,7 +320,18 @@ class TrainingData(Task):
             datetime.date(2012, 1, 1), datetime.date(2019, 1, 1), freq="M"
         )
         rain_task_map = {i: rain_task.clone(month=i) for i in month_list}
-        return {"rain": rain_task_map, "yield": GetMaizeProduction()}
+        return {
+            "rain": rain_task_map,
+            "yield": GetMaizeProduction(),
+            "silt": SoilSiltSummary(),
+            "bulk": SoilBulkDensitySummary(),
+            "clay": SoilClaySummary(),
+        }
+
+    def output(self):
+        return LocalTarget(
+            path="/home/pmburu/repo/yield-estimation/yield-estimation/data/data.csv"
+        )
 
     def run(self):
         input_map = self.input()
@@ -214,15 +345,31 @@ class TrainingData(Task):
             year_map[year] = pd.concat(
                 [v for k, v in input_map["rain"].items() if k.year == year], 1
             )
+        with input_map["silt"].open() as src:
+            df_silt = src.read()
+        with input_map["bulk"].open() as src:
+            df_bulk = src.read()
+        with input_map["clay"].open() as src:
+            df_clay = src.read()
+        # breakpoint()
         df = pd.concat(year_map)
-        breakpoint()
+        for _df in [df_silt, df_bulk, df_clay]:
+            df = df.merge(_df, on="admin1", how="left")
+        with input_map["yield"].open() as src:
+            df_yield = src.read()
+        df_yield = df_yield.drop(["Unnamed: 4", "Unnamed: 5"], 1)
+        df_yield = df_yield.rename(columns={"county": "admin1"})
+        df = df.T.drop_duplicates().T
+        df = df.merge(df_yield, on=["year", "admin1"], how="outer")
+        with self.output().open("w") as out:
+            df.to_csv(out.name, index=False)
 
 
 if __name__ == "__main__":
     month_list = pd.date_range(
         datetime.date(2012, 1, 1), datetime.date(2019, 1, 1), freq="M"
     )
-    luigi.build(
-        [ScrapeERA5Var(month=i) for i in month_list], workers=10, local_scheduler=True
-    )
-    # luigi.build([ScrapeERA5Var()], workers=1, local_scheduler=True)
+    # luigi.build(
+    #     [ScrapeERA5Var(month=i) for i in month_list], workers=10, local_scheduler=True
+    # )
+    luigi.build([TrainingData()], workers=1, local_scheduler=True)
