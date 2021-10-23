@@ -24,6 +24,23 @@ CLIENT = boto3.client(
 )
 
 
+class ScrapeAdminLevel2(ExternalTask):
+    def output(self):
+        dst = Path(DATA_DIR) / "ken_adm_iebc_20191031_shp.zip"
+        return LocalTarget(path=str(dst))
+
+    def run(self):
+        url = "https://data.kimetrica.com/dataset/dbe49118-c859-478a-9000-74c9487397b2/resource/ae58f714-b415-4f91-8072-4050fa577ee0/download/ken_admbnda_adm1_iebc_20191031.zip"
+
+        req = requests.get(url)
+        assert req.status_code == 200, req.raise_for_status()
+
+        with self.output().open("w") as out:
+            with open(out.name, "wb") as fd:
+                for chunk in req.iter_content(chunk_size=1024):
+                    fd.write(chunk)
+
+
 class ScrapeERA5Var(ExternalTask):
     var = luigi.Parameter(default="air_temperature_at_2_metres")
     month = luigi.DateParameter(default=datetime.date(2012, 1, 1))
@@ -44,6 +61,18 @@ class ScrapeERA5Var(ExternalTask):
         ds = ds.expand_dims({"month": [self.month.strftime("%Y-%m-%d")]})
         with self.output().open("w") as out:
             ds.to_netcdf(out.name)
+
+
+@requires(ScrapeERA5Var, ScrapeAdminLevel2)
+class WeatherVariableSummaryStats(Task):
+    def output(self):
+        return IntermediateTarget(task=self, timeout=1_036_800)
+
+    def run(self):
+        var_src = self.input()[0].path
+        admin_src = self.input()[1].path
+        da = xr.open_dataset(var_src)
+        breakpoint()
 
 
 class ScrapeRainfall(ExternalTask):
@@ -75,23 +104,6 @@ class ScrapeRainfall(ExternalTask):
         with self.output().open("w") as out:
             with rasterio.open(out.name, "w", **meta) as dst:
                 dst.write(arr)
-
-
-class ScrapeAdminLevel2(ExternalTask):
-    def output(self):
-        dst = Path(DATA_DIR) / "ken_adm_iebc_20191031_shp.zip"
-        return LocalTarget(path=str(dst))
-
-    def run(self):
-        url = "https://data.kimetrica.com/dataset/dbe49118-c859-478a-9000-74c9487397b2/resource/ae58f714-b415-4f91-8072-4050fa577ee0/download/ken_admbnda_adm1_iebc_20191031.zip"
-
-        req = requests.get(url)
-        assert req.status_code == 200, req.raise_for_status()
-
-        with self.output().open("w") as out:
-            with open(out.name, "wb") as fd:
-                for chunk in req.iter_content(chunk_size=1024):
-                    fd.write(chunk)
 
 
 @requires(ScrapeRainfall, ScrapeAdminLevel2)
@@ -168,10 +180,11 @@ class GetMaizeProduction(ExternalTask):
             }
         )
         df_18["year"] = 2018
-        df_18 = df_18.groupby(["county"])[
+        df_18 = df_18.groupby(["county", "year"], as_index=False)[
             "harvested_area", "production_mt", "value_ksh"
         ].sum()
         df_18 = df_18.reset_index()
+
         df = pd.concat([df_12_16, df_17, df_18])
         df["county"] = df["county"].str.title()
 
@@ -187,6 +200,7 @@ class GetMaizeProduction(ExternalTask):
             "Elgeyo/Marakwet": "Elgeyo-Marakwet",
             "Elgeyo Marakwet": "Elgeyo-Marakwet",
             "Nairobi ": "Nairobi",
+            "Homabay": "Homa Bay",
         }
         df["county"] = df["county"].replace(standardize_county)
         with self.output().open("w") as out:
@@ -351,16 +365,23 @@ class TrainingData(Task):
             df_bulk = src.read()
         with input_map["clay"].open() as src:
             df_clay = src.read()
-        # breakpoint()
+
         df = pd.concat(year_map)
+
         for _df in [df_silt, df_bulk, df_clay]:
-            df = df.merge(_df, on="admin1", how="left")
+            df = df.merge(_df, on=["admin1"], how="left")
+
         with input_map["yield"].open() as src:
             df_yield = src.read()
         df_yield = df_yield.drop(["Unnamed: 4", "Unnamed: 5"], 1)
         df_yield = df_yield.rename(columns={"county": "admin1"})
+        df_yield = df_yield.drop_duplicates(subset=["year", "admin1"])
+
         df = df.T.drop_duplicates().T
-        df = df.merge(df_yield, on=["year", "admin1"], how="outer")
+        df["year"] = df["year"].astype(int)
+        df_yield["year"] = df_yield["year"].astype(int)
+        df = pd.merge(df, df_yield, on=["year", "admin1"], how="outer")
+
         with self.output().open("w") as out:
             df.to_csv(out.name, index=False)
 
